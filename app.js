@@ -1,108 +1,170 @@
 (function () {
-  var D = document.documentElement;
-  var $ = function (s, r) { return (r || document).querySelector(s); };
-  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+  'use strict';
+  var d = document.documentElement;
   var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  /* ---------- Riyadh time and opening hours (minutes from Sunday-style day start; 1440+ = after midnight) ---------- */
+  /* ---------- hours (minutes from midnight, Riyadh time; close > 1440 means after midnight) ---------- */
+  // index 0 = Sunday ... 6 = Saturday
   var H = {
-    hittin: { open: [420, 420, 420, 420, 420, 420, 420], close: [1500, 1500, 1500, 1500, 1560, 1560, 1560] },
-    nakheel: { open: [420, 420, 420, 420, 420, 420, 420], close: [1560, 1560, 1560, 1560, 1560, 1560, 1560] },
-    rayyan: { open: [480, 480, 480, 480, 480, 480, 480], close: [1440, 1440, 1440, 1440, 1500, 1500, 1440] }
+    hittin:  [[420, 1500], [420, 1500], [420, 1500], [420, 1500], [420, 1560], [420, 1560], [420, 1560]],
+    nakheel: [[420, 1560], [420, 1560], [420, 1560], [420, 1560], [420, 1560], [420, 1560], [420, 1560]],
+    rayyan:  [[420, 1440], [420, 1440], [420, 1440], [420, 1440], [420, 1440], [420, 1440], [420, 1440]],
+    kingdom: [[780, 1380], [780, 1380], [780, 1380], [780, 1380], [780, 1380], [960, 1380], [780, 1380]]
   };
+  var NAME = {
+    hittin: { ar: 'حطين', en: 'Hittin' }, nakheel: { ar: 'النخيل', en: 'An Nakheel' },
+    rayyan: { ar: 'الريان', en: 'Ar Rayyan' }, kingdom: { ar: 'برج المملكة', en: 'Kingdom Tower' }
+  };
+  var DAY = {
+    ar: ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'],
+    en: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+  };
+
   function riyadh() {
-    var parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Riyadh', hourCycle: 'h23', weekday: 'short', hour: 'numeric', minute: 'numeric' }).formatToParts(new Date());
-    var o = {}; parts.forEach(function (p) { o[p.type] = p.value; });
-    return { day: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(o.weekday), mins: (parseInt(o.hour, 10) % 24) * 60 + parseInt(o.minute, 10) };
+    // Saudi Arabia is UTC+3 all year (no daylight saving)
+    var t = new Date(Date.now() + 3 * 3600 * 1000);
+    return { day: t.getUTCDay(), min: t.getUTCHours() * 60 + t.getUTCMinutes() };
   }
-  function hr(m, ar) {
-    var h = Math.floor(m / 60) % 24, suf = h < 12 ? (ar ? 'ص' : 'AM') : (ar ? 'م' : 'PM');
-    h = h % 12; if (h === 0) h = 12;
-    return h + ' ' + suf;
+  function fmt(min, lang) {
+    var h = Math.floor(min / 60) % 24, m = min % 60;
+    var mm = m ? ':' + (m < 10 ? '0' : '') + m : '';
+    if (lang === 'ar') {
+      var h12 = h % 12 === 0 ? 12 : h % 12;
+      var p = h < 12 ? 'صباحاً' : h < 15 ? 'ظهراً' : h < 18 ? 'عصراً' : 'مساءً';
+      return h12 + mm + ' ' + p;
+    }
+    var hh = h % 12 === 0 ? 12 : h % 12;
+    return hh + mm + ' ' + (h < 12 ? 'AM' : 'PM');
   }
-  function state(key, t) {
-    var h = H[key], d = t.day, prev = (d + 6) % 7, m = t.mins;
-    if (m >= h.open[d] && m < h.close[d]) return { open: true, until: h.close[d] };
-    if (h.close[prev] > 1440 && m < h.close[prev] - 1440) return { open: true, until: h.close[prev] - 1440 };
-    return { open: false, next: m < h.open[d] ? h.open[d] : h.open[(d + 1) % 7] };
+  function state(key, now) {
+    var s = H[key], today = s[now.day], yest = s[(now.day + 6) % 7];
+    if (yest && yest[1] > 1440 && now.min < yest[1] - 1440) return { open: true, until: yest[1] };
+    if (today && now.min >= today[0] && now.min < today[1]) return { open: true, until: today[1] };
+    if (today && now.min < today[0]) return { open: false, at: today[0], inDays: 0, day: now.day };
+    for (var k = 1; k <= 7; k++) {
+      var dd = (now.day + k) % 7;
+      if (s[dd]) return { open: false, at: s[dd][0], inDays: k, day: dd };
+    }
+    return { open: false };
   }
-  function status() {
-    var t = riyadh();
-    Object.keys(H).forEach(function (k) {
-      var s = state(k, t), ar, en;
-      if (s.open) { ar = 'مفتوح الآن حتى ' + hr(s.until, true); en = 'Open now, until ' + hr(s.until, false); }
-      else { ar = 'مغلق، يفتح ' + hr(s.next, true); en = 'Closed, opens at ' + hr(s.next, false); }
-      $$('[data-status="' + k + '"]').forEach(function (el) {
-        el.setAttribute('data-state', s.open ? 'open' : 'closed');
-        var a = $('[data-l=ar]', el), e = $('[data-l=en]', el);
-        if (a) a.textContent = ar; if (e) e.textContent = en;
-      });
-      $$('[data-today="' + k + '"]').forEach(function (el) {
-        var a = $('[data-l=ar]', el), e = $('[data-l=en]', el);
-        var o = H[k].open[t.day], c = H[k].close[t.day];
-        if (a) a.textContent = hr(o, true) + ' - ' + hr(c, true); if (e) e.textContent = hr(o, false) + ' - ' + hr(c, false);
-      });
-      $$('[data-wk="' + k + '"] li').forEach(function (li) {
-        var days = li.getAttribute('data-days').split(',').map(Number);
-        li.classList.toggle('today', days.indexOf(t.day) > -1);
-      });
+  function label(st, lang) {
+    if (st.open) return lang === 'ar' ? 'مفتوح الآن حتى ' + fmt(st.until, 'ar') : 'Open now, until ' + fmt(st.until, 'en');
+    if (st.at == null) return lang === 'ar' ? 'مغلق' : 'Closed';
+    var when = st.inDays === 0 ? '' : st.inDays === 1 ? (lang === 'ar' ? 'غداً ' : 'tomorrow ') : DAY[lang][st.day] + ' ';
+    return lang === 'ar' ? 'مغلق، يفتح ' + when + fmt(st.at, 'ar') : 'Closed, opens ' + when + fmt(st.at, 'en');
+  }
+  function todayHours(key, now, lang) {
+    var t = H[key][now.day];
+    if (!t) return lang === 'ar' ? 'مغلق اليوم' : 'Closed today';
+    return (lang === 'ar' ? 'اليوم: ' : 'Today: ') + fmt(t[0], lang) + ' - ' + fmt(t[1], lang);
+  }
+  function renderStatus() {
+    var lang = d.lang === 'ar' ? 'ar' : 'en', now = riyadh();
+    document.querySelectorAll('[data-status]').forEach(function (el) {
+      var st = state(el.getAttribute('data-status'), now);
+      el.textContent = label(st, lang);
+      el.classList.toggle('is-open', st.open);
+      el.classList.toggle('is-closed', !st.open);
     });
+    document.querySelectorAll('[data-today-hours]').forEach(function (el) {
+      el.textContent = todayHours(el.getAttribute('data-today-hours'), now, lang);
+    });
+    document.querySelectorAll('[data-days]').forEach(function (li) {
+      var days = li.getAttribute('data-days').split(',').map(Number);
+      if (days.indexOf(now.day) > -1) li.setAttribute('data-today', ''); else li.removeAttribute('data-today');
+    });
+    var hello = document.getElementById('hello');
+    if (hello) {
+      var h = Math.floor(now.min / 60);
+      var greet = lang === 'ar' ? (h >= 5 && h < 12 ? 'صباح الخير' : 'مساء الخير') : (h >= 5 && h < 12 ? 'Good morning' : h >= 12 && h < 17 ? 'Good afternoon' : 'Good evening');
+      var open = Object.keys(H).filter(function (k) { return state(k, now).open; }).map(function (k) { return NAME[k][lang]; });
+      var tail = open.length ? (lang === 'ar' ? 'مفتوح الآن: ' + open.join('، ') : 'Open now: ' + open.join(', '))
+                             : (lang === 'ar' ? 'كل الفروع مغلقة الآن' : 'All branches are closed right now');
+      hello.textContent = greet + (lang === 'ar' ? '. ' : '. ') + tail;
+    }
   }
+  window.__fabricaState = function (key) { return state(key, riyadh()); };
 
   /* ---------- language ---------- */
-  var toggle = $('#lang');
-  function apply() {
-    var l = D.lang;
-    $$('[data-alt-ar]').forEach(function (i) { i.alt = i.getAttribute('data-alt-' + l) || ''; });
-    var b = document.body, k = l === 'ar' ? 'Ar' : 'En';
-    if (b.dataset['title' + k]) document.title = b.dataset['title' + k];
-    var md = $('meta[name=description]');
-    if (md && b.dataset['desc' + k]) md.content = b.dataset['desc' + k];
-    if (toggle) toggle.setAttribute('aria-label', l === 'ar' ? 'Switch to English' : 'التبديل إلى العربية');
-    $$('[data-aria-ar]').forEach(function (e) { e.setAttribute('aria-label', e.getAttribute('data-aria-' + l)); });
+  function applyLang(lang) {
+    d.lang = lang; d.dir = lang === 'ar' ? 'rtl' : 'ltr';
+    var b = document.body;
+    if (b.dataset['title' + (lang === 'ar' ? 'Ar' : 'En')]) document.title = b.dataset[lang === 'ar' ? 'titleAr' : 'titleEn'];
+    var md = document.querySelector('meta[name="description"]');
+    if (md && b.dataset.descAr) md.setAttribute('content', lang === 'ar' ? b.dataset.descAr : b.dataset.descEn);
+    document.querySelectorAll('[data-alt-ar]').forEach(function (im) { im.alt = lang === 'ar' ? im.dataset.altAr : im.dataset.altEn; });
+    document.querySelectorAll('[data-aria-ar]').forEach(function (el) { el.setAttribute('aria-label', lang === 'ar' ? el.dataset.ariaAr : el.dataset.ariaEn); });
+    renderStatus();
   }
-  if (toggle) toggle.addEventListener('click', function () {
-    var l = D.lang === 'ar' ? 'en' : 'ar';
-    D.lang = l; D.dir = l === 'ar' ? 'rtl' : 'ltr';
-    try { localStorage.setItem('fabrica-lang', l); } catch (e) {}
-    apply(); status();
+  var btn = document.getElementById('lang');
+  if (btn) btn.addEventListener('click', function () {
+    var next = d.lang === 'ar' ? 'en' : 'ar';
+    try { localStorage.setItem('fabrica-lang', next); } catch (e) {}
+    applyLang(next);
   });
+  applyLang(d.lang === 'ar' ? 'ar' : 'en');
+  setInterval(renderStatus, 60000);
 
-  /* ---------- hero hand: end of the drawing ---------- */
-  if (D.classList.contains('intro')) setTimeout(function () { D.classList.remove('intro'); }, 2000);
-
-  /* ---------- menu chips ---------- */
-  var chips = $$('.chip[data-cat]');
-  if (chips.length) {
-    var strip = $('.chips .scroll');
-    var setOn = function (id) {
-      chips.forEach(function (c) {
-        var on = c.dataset.cat === id;
-        if (on) c.setAttribute('aria-current', 'true'); else c.removeAttribute('aria-current');
-        if (on && strip) {
-          var cr = c.getBoundingClientRect(), sr = strip.getBoundingClientRect();
-          var delta = (cr.left + cr.width / 2) - (sr.left + sr.width / 2);
-          if (Math.abs(delta) > 4) strip.scrollBy({ left: delta, behavior: reduce ? 'auto' : 'smooth' });
-        }
-      });
-    };
-    chips.forEach(function (c) {
-      c.addEventListener('click', function (e) {
-        e.preventDefault();
-        var sec = document.getElementById(c.dataset.cat);
-        if (sec) { sec.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' }); try { history.replaceState(null, '', '#' + c.dataset.cat); } catch (x) {} }
-        setOn(c.dataset.cat);
-      });
-    });
-    if ('IntersectionObserver' in window) {
-      var io = new IntersectionObserver(function (en) {
-        en.forEach(function (e) { if (e.isIntersecting) setOn(e.target.id); });
-      }, { rootMargin: '-150px 0px -65% 0px' });
-      $$('.cat').forEach(function (s) { io.observe(s); });
-    }
-    if (location.hash) { var s0 = document.getElementById(location.hash.slice(1)); if (s0 && s0.classList.contains('cat')) setOn(s0.id); }
+  /* ---------- home header: solid once the hero has scrolled away ---------- */
+  var hero = document.querySelector('.hero');
+  if (hero && 'IntersectionObserver' in window) {
+    var hio = new IntersectionObserver(function (es) {
+      document.body.classList.toggle('solid', !es[0].isIntersecting);
+    }, { rootMargin: '-64px 0px 0px 0px' });
+    hio.observe(hero);
   }
 
-  apply(); status();
-  setInterval(status, 60000);
+  /* ---------- floor 77 counter: rolls 01 to 77 once, like a lift display ---------- */
+  var num = document.querySelector('[data-floor]');
+  if (num && 'IntersectionObserver' in window && !reduce) {
+    var target = +num.getAttribute('data-floor'), done = false;
+    num.textContent = '01';
+    var io = new IntersectionObserver(function (es) {
+      es.forEach(function (e) {
+        if (done) return;
+        if (e.intersectionRatio < 0.5) {
+          // scrolled past it in one fling: show the final floor
+          if (e.boundingClientRect.top < innerHeight * 0.5) { done = true; io.disconnect(); num.textContent = String(target); }
+          return;
+        }
+        done = true; io.disconnect();
+        var t0 = performance.now(), dur = 1400;
+        var tick = setInterval(function () {
+          var p = Math.min(1, (performance.now() - t0) / dur), v = Math.max(1, Math.round(1 + (target - 1) * (1 - Math.pow(1 - p, 3))));
+          num.textContent = (v < 10 ? '0' : '') + v;
+          if (p >= 1) { clearInterval(tick); num.textContent = String(target); }
+        }, 32);
+      });
+    }, { threshold: [0, 0.5, 1], rootMargin: '0px 0px -22% 0px' });
+    io.observe(num);
+  }
+
+  /* ---------- menu: category bar ---------- */
+  var bar = document.querySelector('.cbar ul');
+  if (bar) {
+    var chips = Array.prototype.slice.call(bar.querySelectorAll('a'));
+    var byId = {};
+    chips.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+    var current = null;
+    function setActive(id) {
+      if (id === current || !byId[id]) return;
+      current = id;
+      chips.forEach(function (a) { a.removeAttribute('aria-current'); });
+      var a = byId[id]; a.setAttribute('aria-current', 'true');
+      var br = bar.getBoundingClientRect(), ar = a.getBoundingClientRect();
+      if (ar.left < br.left + 16 || ar.right > br.right - 16) {
+        bar.scrollBy({ left: (ar.left + ar.width / 2) - (br.left + br.width / 2), behavior: reduce ? 'auto' : 'smooth' });
+      }
+    }
+    var secs = Array.prototype.slice.call(document.querySelectorAll('.mcat'));
+    if ('IntersectionObserver' in window) {
+      var vis = {};
+      var mo = new IntersectionObserver(function (es) {
+        es.forEach(function (e) { vis[e.target.id] = e.isIntersecting; });
+        for (var i = 0; i < secs.length; i++) { if (vis[secs[i].id]) { setActive(secs[i].id); break; } }
+      }, { rootMargin: '-140px 0px -55% 0px' });
+      secs.forEach(function (s) { mo.observe(s); });
+    }
+    chips.forEach(function (a) { a.addEventListener('click', function () { setActive(a.getAttribute('href').slice(1)); }); });
+  }
 })();
